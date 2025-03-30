@@ -125,10 +125,10 @@ class Trader:
     def __init__(self):
         # Configuration parameters
         self.position_limit = 50
-        self.target_inventory = 0  # Target inventory level (default: neutral)
+        self.target_inventory = 0 # Target inventory level (default: neutral)
         
         # Stoikov model parameters
-        self.gamma = 0.00001  # Risk aversion parameter (lower = more willing to take risks)
+        self.gamma = 0.00000000000005  # Risk aversion parameter (lower = more willing to take risks) - set low rn, seems to perform best like this
         self.time_horizon = 20000  # Approximate trading session duration in ticks
         
         # State variables
@@ -389,7 +389,7 @@ class Trader:
         if order_depth.buy_orders and current_position > -self.max_position_per_side:
             for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
                 # Check if price is above our fair value threshold
-                if price > fair_value * (1 + self.arbitrage_threshold):
+                if price > fair_value * (1 + self.arbitrage_threshold): #arb threshold at 0, take advantage of any opportunity
                     # Calculate how much we can sell
                     available_to_sell = min(
                         abs(volume),  # Available volume at this price
@@ -413,7 +413,7 @@ class Trader:
         if order_depth.sell_orders and current_position < self.max_position_per_side:
             for price, volume in sorted(order_depth.sell_orders.items()):
                 # Check if price is below our fair value threshold
-                if price < fair_value * (1 - self.arbitrage_threshold):
+                if price < fair_value * (1 - self.arbitrage_threshold):  #arb threshold at 0, take advantage of any opportunity
                     # Calculate how much we can buy
                     available_to_buy = min(
                         abs(volume),  # Available volume at this price
