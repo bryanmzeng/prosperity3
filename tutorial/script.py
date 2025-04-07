@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 import math
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
+#to run prosperity3bt tutorial/script.py 0
 
 class Logger:
     def __init__(self) -> None:
@@ -148,6 +149,11 @@ class Trader:
         self.aggressive_mode = True
         self.max_position_per_side = 49  # Maximum position in one direction (avoid hitting limits)
         self.exponential_position_scaling = False  # Scale order sizes exponentially with position
+
+        # --- KELP-specific state ---
+        # Since the resin branch does not track position state (entry/stop),
+        # we create our own for KELP to manage trailing stops and entry prices.
+        self.kelp_state = {"position": 0, "entry_price": None, "stop_price": None}
         
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         """
@@ -247,8 +253,96 @@ class Trader:
             self.last_mid_prices[symbol] = mid_price
         
         # Initialize empty order list for KELP (no trading in tutorial)
+        # --- New KELP Strategy: Relaxed Donchian Breakout with Order-Book Filter and Trailing Stop ---
+
+        # --- KELP-Only Market Making with Momentum Adjustment ---
+
         if "KELP" in state.order_depths:
-            result["KELP"] = []
+            symbol = "KELP"
+            order_depth = state.order_depths[symbol]
+            current_position = state.position.get(symbol, 0)
+
+            # Ensure price history exists
+            if symbol not in self.price_history:
+                self.price_history[symbol] = []
+
+            # Get current market data
+            market_data = self.analyze_market(symbol, order_depth)
+            best_bid = market_data["best_bid"]
+            best_ask = market_data["best_ask"]
+            mid_price = market_data["mid_price"]
+
+            # Update price history (keep last 100 ticks)
+            self.price_history[symbol].append(mid_price)
+            if len(self.price_history[symbol]) > 100:
+                self.price_history[symbol] = self.price_history[symbol][-100:]
+
+            # Compute volatility using standard deviation of returns
+            returns = []
+            prices = self.price_history[symbol]
+            for i in range(1, len(prices)):
+                if prices[i-1] != 0:
+                    returns.append((prices[i] - prices[i-1]) / prices[i-1])
+            sigma = self.compute_std(returns) if returns else 0.001
+
+            # Compute a 20-tick SMA to capture drift
+            window = 20
+            sma = self.compute_sma(prices, window) if len(prices) >= window else mid_price
+            momentum = mid_price - sma  # positive if drifting up, negative if down
+
+            # Inventory risk adjustment: penalize building up position
+            gamma_kelp = 0.00005  # tune this parameter
+            q = current_position - self.target_inventory
+            inventory_adj = q * gamma_kelp * (sigma ** 2)
+
+            # Momentum adjustment: nudge the reservation price in the drift direction
+            momentum_factor = 0.5  # tune sensitivity to drift
+            reservation_price = mid_price - inventory_adj + momentum_factor * momentum
+
+            # Compute half-spread based on a base spread plus volatility scaling
+            base_spread = 0.06       # base half-spread (tuned for low volatility)
+            beta = 1.2               # volatility multiplier for spread widening
+            half_spread = base_spread + beta * sigma
+            half_spread = max(half_spread, 0.02)
+
+            # Dynamic spread widening: if order-book imbalance is extreme, add extra spread
+            buy_vol = sum([abs(qty) for qty in order_depth.buy_orders.values()]) if order_depth.buy_orders else 0
+            sell_vol = sum([abs(qty) for qty in order_depth.sell_orders.values()]) if order_depth.sell_orders else 0
+            total_vol = buy_vol + sell_vol
+            imbalance = (buy_vol - sell_vol) / total_vol if total_vol > 0 else 0
+            if abs(imbalance) > 0.3:
+                half_spread += 0.01
+
+            # Ensure the total spread (bid-ask difference) meets a minimum profit threshold
+            min_profit_threshold = 0.04
+            if (2 * half_spread) < min_profit_threshold:
+                adjustment = (min_profit_threshold - (2 * half_spread)) / 2
+                bid_price = reservation_price - half_spread - adjustment
+                ask_price = reservation_price + half_spread + adjustment
+            else:
+                bid_price = reservation_price - half_spread
+                ask_price = reservation_price + half_spread
+
+            # Determine order sizes based on a fixed base size and position limits
+            base_size = 10
+            remaining_buy_capacity = self.max_position_per_side - current_position
+            remaining_sell_capacity = self.max_position_per_side + current_position
+            bid_size = min(base_size, remaining_buy_capacity)
+            ask_size = min(base_size, remaining_sell_capacity)
+
+            market_making_orders = []
+            if bid_size > 0:
+                market_making_orders.append(Order(symbol, int(bid_price), bid_size))
+            if ask_size > 0:
+                market_making_orders.append(Order(symbol, int(ask_price), -ask_size))
+
+            result[symbol] = market_making_orders
+
+
+
+
+
+
         
         # No conversions in tutorial round
         conversions = 0
@@ -262,21 +356,38 @@ class Trader:
             "fair_value_estimates": self.fair_value_estimates,
             "realized_pnl": self.realized_pnl,
             "trades_completed": self.trades_completed,
+            "kelp_state": self.kelp_state,  # Persist kelp-specific state
         })
         
         # Return results
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
     
+    def compute_std(self, data: list[float]) -> float:
+        """Compute standard deviation of a list of numbers."""
+        if not data:
+            return 0.0
+        mean = sum(data) / len(data)
+        variance = sum((x - mean) ** 2 for x in data) / len(data)
+        return math.sqrt(variance)
+
+    def compute_sma(self, data: list[float], window: int) -> float:
+        """
+        Compute the Simple Moving Average (SMA) of the last `window` elements.
+        If there are fewer than `window` elements, return the average of available data.
+        """
+        if not data:
+            return 0.0
+        if len(data) < window:
+            return sum(data) / len(data)
+        subset = data[-window:]
+        return sum(subset) / len(subset)
+    
     def initialize_or_load_data(self, trader_data: str) -> Dict:
-        """Initialize or load stored data"""
         stored_data = {}
-        
         if trader_data:
             try:
                 stored_data = json.loads(trader_data)
-                
-                # Update class variables
                 self.price_history = stored_data.get("price_history", {})
                 self.volatility_estimates = stored_data.get("volatility_estimates", {})
                 self.last_mid_prices = stored_data.get("last_mid_prices", {})
@@ -284,12 +395,16 @@ class Trader:
                 self.fair_value_estimates = stored_data.get("fair_value_estimates", {})
                 self.realized_pnl = stored_data.get("realized_pnl", {})
                 self.trades_completed = stored_data.get("trades_completed", {})
-                
+                # Load kelp_state if it exists; otherwise, initialize it
+                self.kelp_state = stored_data.get("kelp_state", {"position": 0, "entry_price": None, "stop_price": None})
             except Exception as e:
                 logger.print(f"Error loading trader data: {e}")
                 stored_data = {}
-        
+                self.kelp_state = {"position": 0, "entry_price": None, "stop_price": None}
+        else:
+            self.kelp_state = {"position": 0, "entry_price": None, "stop_price": None}
         return stored_data
+
     
     def analyze_market(self, symbol: str, order_depth: OrderDepth) -> Dict:
         """Analyze market data and return key metrics"""
