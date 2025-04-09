@@ -246,9 +246,105 @@ class Trader:
             # Store mid price for next iteration
             self.last_mid_prices[symbol] = mid_price
         
-        # Initialize empty order list for KELP (no trading in tutorial)
+        # Process KELP with joining and pennying strategy
         if "KELP" in state.order_depths:
-            result["KELP"] = []
+            symbol = "KELP"
+            order_depth = state.order_depths[symbol]
+            current_position = state.position.get(symbol, 0)
+            
+            # Track this product's trades count
+            if symbol not in self.trades_completed:
+                self.trades_completed[symbol] = 0
+            
+            # Get market data
+            market_data = self.analyze_market(symbol, order_depth)
+            
+            # Update price history for KELP
+            if symbol not in self.price_history:
+                self.price_history[symbol] = []
+            
+            if "mid_price" in market_data:
+                mid_price = market_data["mid_price"]
+                self.price_history[symbol].append(mid_price)
+                if len(self.price_history[symbol]) > 100:
+                    self.price_history[symbol] = self.price_history[symbol][-100:]
+            
+            # Initialize orders list
+            kelp_orders = []
+            
+            # Implement joining and pennying strategy for KELP
+            if order_depth.buy_orders and order_depth.sell_orders:
+                # Get best bid and ask
+                best_bid = max(order_depth.buy_orders.keys())
+                best_ask = min(order_depth.sell_orders.keys())
+                
+                # Calculate the spread
+                spread = best_ask - best_bid
+                
+                # Position-aware order sizing
+                long_capacity = self.max_position_per_side - current_position
+                short_capacity = self.max_position_per_side + current_position
+                
+                # Base size adjusted by position
+                base_size = 10
+                position_factor = current_position / self.position_limit
+                
+                # Adjust size based on position - use less aggressive sizes when nearing limits
+                bid_size = max(1, int(base_size * (1 - max(0, position_factor))))
+                ask_size = max(1, int(base_size * (1 - max(0, -position_factor))))
+                
+                # Limit sizes to available capacity
+                bid_size = min(bid_size, long_capacity)
+                ask_size = min(ask_size, short_capacity)
+                
+                # Implement pennying strategy when spread is wide enough
+                if spread > 2:  # If spread is more than 2 ticks
+                    # Penny the best bid if we have buying capacity
+                    if bid_size > 0:
+                        penny_bid_price = best_bid + 1
+                        kelp_orders.append(Order(symbol, penny_bid_price, bid_size))
+                    
+                    # Penny the best ask if we have selling capacity
+                    if ask_size > 0:
+                        penny_ask_price = best_ask - 1
+                        kelp_orders.append(Order(symbol, penny_ask_price, -ask_size))
+                else:
+                    # Join the best bid/ask when spread is narrow
+                    if bid_size > 0:
+                        kelp_orders.append(Order(symbol, best_bid, bid_size))
+                    
+                    if ask_size > 0:
+                        kelp_orders.append(Order(symbol, best_ask, -ask_size))
+                
+                # Opportunistic deep book orders
+                # If there's significant buying pressure, place additional sell orders
+                buy_volume = sum([abs(qty) for qty in order_depth.buy_orders.values()])
+                sell_volume = sum([abs(qty) for qty in order_depth.sell_orders.values()])
+                
+                # If book imbalance > 20% and we have capacity, place additional orders
+                if buy_volume > sell_volume * 1.2 and short_capacity > ask_size:
+                    # Place additional sell orders at higher price
+                    extra_ask_size = min(5, short_capacity - ask_size)
+                    kelp_orders.append(Order(symbol, best_ask + 2, -extra_ask_size))
+                
+                # If strong selling pressure, place additional buy orders
+                elif sell_volume > buy_volume * 1.2 and long_capacity > bid_size:
+                    # Place additional buy orders at lower price
+                    extra_bid_size = min(5, long_capacity - bid_size)
+                    kelp_orders.append(Order(symbol, best_bid - 2, extra_bid_size))
+                
+                # Log the KELP strategy info
+                logger.print(f"===== {symbol} Joining/Pennying Market Making =====")
+                logger.print(f"Best Bid: {best_bid}, Best Ask: {best_ask}, Spread: {spread}")
+                logger.print(f"Position: {current_position}/{self.position_limit}")
+                logger.print(f"Orders: {len(kelp_orders)}")
+                
+                # Store mid price for next iteration if available
+                if "mid_price" in market_data:
+                    self.last_mid_prices[symbol] = market_data["mid_price"]
+            
+            # Add KELP orders to result
+            result[symbol] = kelp_orders
         
         # No conversions in tutorial round
         conversions = 0
@@ -267,7 +363,7 @@ class Trader:
         # Return results
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
-    
+       
     def initialize_or_load_data(self, trader_data: str) -> Dict:
         """Initialize or load stored data"""
         stored_data = {}
