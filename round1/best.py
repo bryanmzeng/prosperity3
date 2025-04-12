@@ -127,7 +127,7 @@ class Trader:
     def __init__(self):
         # Configuration parameters
         self.position_limit = 50
-        self.target_inventory = 0 # Target inventory level (default: neutral)
+        self.target_inventory = 20 # Target inventory level (default: neutral)
         
         
         # State variables
