@@ -22,9 +22,9 @@ PARAMS = {
     Product.SPREAD: {
         "default_spread_mean": 46.7624, #46.7624 at 7.8k, 48.7624 original
         "default_spread_std": 83.5354,
-        "spread_std_window": 58, #58 best
+        "spread_std_window": 58, #55 best
         "zscore_threshold": 3, # 3 is at 6.8k
-        "target_position": 58, #58 original w/o basket 2
+        "target_position": 55, #58 original w/o basket 2
     },
     Product.SPREAD2: {
         "default_spread_mean": 30.2359,
