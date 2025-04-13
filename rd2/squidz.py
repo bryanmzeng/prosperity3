@@ -1,7 +1,7 @@
 import json
 from typing import Any, Dict, List
 import math
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+from rd2.datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 import collections
 import statistics
 import numpy as np
@@ -12,7 +12,7 @@ import pandas as pd
 # === Enhancement Utilities (No sklearn) ===
 import pandas as pd
 
-def calculate_zscore(prices, window=20):
+def calculate_zscore(prices, window=10):
     mean = prices.rolling(window).mean()
     std = prices.rolling(window).std()
     return (prices - mean) / std
@@ -436,106 +436,66 @@ class Trader:
             logger.print(f"ERROR in run: {str(e)}")
             return {}, 0, ""
 
-
     def process_squid_ink_enhanced(self, state: TradingState, result: dict) -> None:
-        """
-        Enhanced SQUID_INK trading strategy with improved SMC integration and risk management.
-        """
         symbol = "SQUID_INK"
-        position_limit = 40  # Position limit for SQUID_INK
+        position_limit = 40
         squid_orders = []
-
-        # Get current order book and position
         order_depth = state.order_depths[symbol]
         current_position = state.position.get(symbol, 0)
-
-        # Sort order books for easier processing
         sell_orders = collections.OrderedDict(sorted(order_depth.sell_orders.items()))
         buy_orders = collections.OrderedDict(sorted(order_depth.buy_orders.items(), reverse=True))
-
-        # Calculate mid price and update history
         best_sell_price = min(sell_orders.keys()) if sell_orders else None
         best_buy_price = max(buy_orders.keys()) if buy_orders else None
-
         if best_sell_price and best_buy_price:
             mid_price = (best_sell_price + best_buy_price) / 2
             spread = best_sell_price - best_buy_price
         elif best_sell_price:
             mid_price = best_sell_price
-            spread = 2  # Assume default spread
+            spread = 2
         elif best_buy_price:
             mid_price = best_buy_price
-            spread = 2  # Assume default spread
-        else:
-            mid_price = self.last_mid_prices.get(symbol, 1875)  # Default based on chart data
             spread = 2
-
-        # Update price history for SQUID_INK
+        else:
+            mid_price = self.last_mid_prices.get(symbol, 1875)
+            spread = 2
         if symbol not in self.price_history:
             self.price_history[symbol] = []
         self.price_history[symbol].append(mid_price)
-        # Limit history size to 100 data points
         if len(self.price_history[symbol]) > 100:
             self.price_history[symbol] = self.price_history[symbol][-100:]
-
-        # OPTIONAL: Update optimal thresholds if we have enough history (e.g., 50 data points)
         if len(self.price_history[symbol]) >= 50:
             self.set_optimal_thresholds(pd.Series(self.price_history[symbol]))
-
-        # STEP 1: UPDATE SMC MODEL
-        market_data = {
-            'current_price': mid_price,
-            'spread': spread,
-            'best_bid': best_buy_price,
-            'best_ask': best_sell_price,
-            'position': current_position
-        }
+        market_data = {'current_price': mid_price, 'spread': spread, 'best_bid': best_buy_price, 'best_ask': best_sell_price, 'position': current_position}
         self.smc_trader.update_particles(market_data)
         smc_prediction = self.smc_trader.get_final_prediction()
-
-        # STEP 2: CALCULATE ADVANCED INDICATORS
         volatility = np.std(self.price_history[symbol][-20:]) if len(self.price_history[symbol]) >= 20 else 10
         long_term_mean = np.mean(self.price_history[symbol][-50:]) if len(self.price_history[symbol]) >= 50 else mid_price
         z_score = (mid_price - long_term_mean) / volatility if volatility > 0 else 0
-        short_term_change = 0
-        if len(self.price_history[symbol]) >= 5:
-            short_term_change = self.price_history[symbol][-1] - self.price_history[symbol][-5]
+        short_term_change = self.price_history[symbol][-1] - self.price_history[symbol][-5] if len(self.price_history[symbol]) >= 5 else 0
         spike_detected = False
         if len(self.price_history[symbol]) >= 3:
-            last_moves = [self.price_history[symbol][i] - self.price_history[symbol][i-1] 
-                        for i in range(-1, -3, -1)]
+            last_moves = [self.price_history[symbol][i] - self.price_history[symbol][i-1] for i in range(-1, -3, -1)]
             spike_detected = (last_moves[0] * last_moves[1] < 0) and (abs(last_moves[0]) > volatility)
-
         self.update_squid_ink_features(state, symbol, mid_price)
         ensemble_price, price_diff = self.predict_with_ensemble(mid_price)
-
-        # STEP 3: COMBINE PREDICTIONS WITH WEIGHTS
         ensemble_weight = max(0.2, min(0.7, 1.0 - volatility/30))
         smc_weight = 1.0 - ensemble_weight
         combined_prediction = ensemble_price * ensemble_weight + smc_prediction * smc_weight
-
-        # STEP 4: DETERMINE ADAPTIVE THRESHOLD BASED ON MARKET CONDITIONS
-        position_factor = abs(current_position) / position_limit  # How full our position is
-        vol_factor = volatility / 15  # Normalized volatility
+        position_factor = abs(current_position) / position_limit
+        vol_factor = volatility / 15
         if hasattr(self, 'optimal_threshold'):
             adjusted_threshold = self.optimal_threshold * (1 + 0.5 * position_factor + 0.5 * vol_factor)
         else:
             base_threshold = max(1.5, min(5, volatility * 0.75))
             adjusted_threshold = base_threshold * (1 + 0.5 * position_factor + 0.5 * vol_factor)
-
-        # Calculate acceptable prices
         fair_value = combined_prediction
         acc_bid = int(fair_value - adjusted_threshold)
         acc_ask = int(fair_value + adjusted_threshold)
-
-        # STEP 5: IMPROVED RISK MANAGEMENT
         if abs(current_position) > position_limit * 0.7:
             if current_position > 0:
-                acc_ask -= 2  # Lower sell price to unwind long position
+                acc_ask -= 2
             else:
-                acc_bid += 2  # Raise buy price to unwind short position
-
-        # STEP 6: EXECUTION LOGIC WITH IMPROVED SIZING
+                acc_bid += 2
         position = current_position
         for price, volume in sell_orders.items():
             if (price < acc_bid or (current_position < -10 and price <= fair_value)) and position < position_limit:
@@ -544,14 +504,13 @@ class Trader:
                 if z_score < -1.5:
                     size_factor = min(1.0, size_factor * 1.3)
                 order_size = min(-volume, int((position_limit - position) * size_factor))
+                order_size = int(order_size * (1 if volatility < 15 else 0.75 if volatility < 20 else 0.5))
                 if order_size > 0:
                     squid_orders.append(Order(symbol, price, order_size))
                     position += order_size
-                    logger.print(f"SQUID OPPORTUNITY BUY: {order_size} @ {price} (z={z_score:.2f}, vol={volatility:.2f})")
-
+                    logger.print("SQUID OPPORTUNITY BUY:", order_size, "@", price, "z=", round(z_score,2), "vol=", round(volatility,2))
         undercut_buy = best_buy_price + 1 if best_buy_price else acc_bid - 1
         undercut_sell = best_sell_price - 1 if best_sell_price else acc_ask + 1
-
         bid_price = min(undercut_buy, acc_bid)
         if z_score > 1.0 and volatility > 12:
             bid_price = min(bid_price, acc_bid - 1)
@@ -564,10 +523,10 @@ class Trader:
         else:
             confidence = min(1.0, max(0.4, 1.0 - abs(z_score) * 0.15))
             bid_size = min(15, int((position_limit - position) * confidence))
+        bid_size = int(bid_size * (1 if volatility < 15 else 0.75 if volatility < 20 else 0.5))
         if bid_size > 0 and position < position_limit and current_position < position_limit * 0.8:
             squid_orders.append(Order(symbol, bid_price, bid_size))
             position += bid_size
-
         position = current_position
         for price, volume in buy_orders.items():
             if (price > acc_ask or (current_position > 10 and price >= fair_value)) and position > -position_limit:
@@ -576,11 +535,11 @@ class Trader:
                 if z_score > 1.5:
                     size_factor = min(1.0, size_factor * 1.3)
                 order_size = max(-volume, int((-position_limit - position) * size_factor))
+                order_size = int(order_size * (1 if volatility < 15 else 0.75 if volatility < 20 else 0.5))
                 if order_size < 0:
                     squid_orders.append(Order(symbol, price, order_size))
                     position += order_size
-                    logger.print(f"SQUID OPPORTUNITY SELL: {-order_size} @ {price} (z={z_score:.2f}, vol={volatility:.2f})")
-
+                    logger.print("SQUID OPPORTUNITY SELL:", -order_size, "@", price, "z=", round(z_score,2), "vol=", round(volatility,2))
         ask_price = max(undercut_sell, acc_ask)
         if z_score < -1.0 and volatility > 12:
             ask_price = max(ask_price, acc_ask + 1)
@@ -593,11 +552,10 @@ class Trader:
         else:
             confidence = min(1.0, max(0.2, 1.0 - abs(z_score) * 0.2))
             ask_size = max(-15, int((-position_limit - position) * confidence))
+        ask_size = int(ask_size * (1 if volatility < 15 else 0.75 if volatility < 20 else 0.5))
         if ask_size < 0 and position > -position_limit and current_position > -position_limit * 0.8:
             squid_orders.append(Order(symbol, ask_price, ask_size))
             position += ask_size
-
-        # STEP 7: ACTIVE POSITION MANAGEMENT
         if abs(z_score) > 2.0 and volatility < 15:
             target_position = int(-z_score * 10)
             target_position = max(-position_limit * 0.8, min(position_limit * 0.8, target_position))
@@ -608,42 +566,38 @@ class Trader:
                     extra_buy_price = max(acc_bid - 1, min(undercut_buy, acc_bid))
                     if extra_buy_size > 0:
                         squid_orders.append(Order(symbol, extra_buy_price, extra_buy_size))
-                        logger.print(f"SQUID POSITION ADJUSTMENT BUY: {extra_buy_size} @ {extra_buy_price}")
+                        logger.print("SQUID POSITION ADJUSTMENT BUY:", extra_buy_size, "@", extra_buy_price)
                 elif position_delta < 0 and position > -position_limit:
                     extra_sell_size = max(position_delta, -position_limit - position)
                     extra_sell_price = min(acc_ask + 1, max(undercut_sell, acc_ask))
                     if extra_sell_size < 0:
                         squid_orders.append(Order(symbol, extra_sell_price, extra_sell_size))
-                        logger.print(f"SQUID POSITION ADJUSTMENT SELL: {-extra_sell_size} @ {extra_sell_price}")
-
-        # STEP 8: TRAILING STOP LOGIC FOR RISK MANAGEMENT
+                        logger.print("SQUID POSITION ADJUSTMENT SELL:", -extra_sell_size, "@", extra_sell_price)
         if current_position > 10:
             if len(self.price_history[symbol]) >= 10:
                 recent_high = max(self.price_history[symbol][-10:])
-                stop_price = int(recent_high * 0.99)
+                stop_price = int(recent_high * 0.995)
                 if mid_price < stop_price and mid_price < long_term_mean:
                     stop_size = min(current_position // 2, position_limit)
                     if stop_size > 0:
                         squid_orders.append(Order(symbol, best_buy_price, -stop_size))
-                        logger.print(f"SQUID TRAILING STOP SELL: {stop_size} @ {best_buy_price}")
+                        logger.print("SQUID TRAILING STOP SELL:", stop_size, "@", best_buy_price)
         elif current_position < -10:
             if len(self.price_history[symbol]) >= 10:
                 recent_low = min(self.price_history[symbol][-10:])
-                stop_price = int(recent_low * 1.01)
+                stop_price = int(recent_low * 1.005)
                 if mid_price > stop_price and mid_price > long_term_mean:
                     stop_size = min(abs(current_position) // 2, position_limit)
                     if stop_size > 0:
                         squid_orders.append(Order(symbol, best_sell_price, stop_size))
-                        logger.print(f"SQUID TRAILING STOP BUY: {stop_size} @ {best_sell_price}")
-
-        logger.print(f"===== {symbol} Enhanced Trading =====")
-        logger.print(f"Price: {mid_price:.2f}, SMC Pred: {smc_prediction:.2f}, Ensemble: {ensemble_price:.2f}")
-        logger.print(f"Combined: {combined_prediction:.2f}, Fair Value: {fair_value:.2f}, Z-Score: {z_score:.2f}")
-        logger.print(f"Volatility: {volatility:.2f}, Momentum: {short_term_change:.2f}, Spike: {spike_detected}")
-        logger.print(f"Threshold: {adjusted_threshold:.2f}, Bid: {acc_bid}, Ask: {acc_ask}")
-        logger.print(f"Position: {current_position}/{position_limit}")
-        logger.print(f"Orders: {len(squid_orders)}")
-
+                        logger.print("SQUID TRAILING STOP BUY:", stop_size, "@", best_sell_price)
+        logger.print("=====", symbol, "Enhanced Trading =====")
+        logger.print("Price:", round(mid_price,2), "SMC Pred:", round(smc_prediction,2), "Ensemble:", round(ensemble_price,2))
+        logger.print("Combined:", round(combined_prediction,2), "Fair Value:", round(fair_value,2), "Z-Score:", round(z_score,2))
+        logger.print("Volatility:", round(volatility,2), "Momentum:", round(short_term_change,2), "Spike:", spike_detected)
+        logger.print("Threshold:", round(adjusted_threshold,2), "Bid:", acc_bid, "Ask:", acc_ask)
+        logger.print("Position:", current_position, "/", position_limit)
+        logger.print("Orders:", len(squid_orders))
         self.last_mid_prices[symbol] = mid_price
         if not hasattr(self, 'volatility_estimates'):
             self.volatility_estimates = {}
@@ -908,69 +862,32 @@ class Trader:
 
         return predicted_price, predicted_diff
     
-    def grid_search_optimal_thresholds(self, price_series: pd.Series, 
-                                    entry_range=(-3.0, -1.0), exit_range=(1.0, 3.0), 
-                                    steps=5) -> Dict[str, float]:
-        """
-        Grid search for optimal entry and exit z-score thresholds using historical price data,
-        without running a full trading simulation.
-
-        Parameters:
-            price_series: pd.Series
-                The historical price data to use for evaluation.
-            entry_range: tuple(float, float)
-                The range of entry thresholds (for longs) to try (e.g., between -3 and -1).
-            exit_range: tuple(float, float)
-                The range of exit thresholds (for shorts) to try (e.g., between 1 and 3).
-            steps: int
-                Number of grid steps in each range.
-
-        Returns:
-            A dictionary with the best thresholds:
-                {'entry_threshold': optimal_entry, 'exit_threshold': optimal_exit}
-        """
+    def grid_search_optimal_thresholds(self, price_series: pd.Series, entry_range=(-3.0, -1.0), exit_range=(1.0, 3.0), steps=5) -> Dict[str, float]:
         best_score = -np.inf
         best_params = {'entry_threshold': entry_range[0], 'exit_threshold': exit_range[0]}
-
         entry_values = np.linspace(entry_range[0], entry_range[1], steps)
         exit_values = np.linspace(exit_range[0], exit_range[1], steps)
-        
-        # Calculate the rolling z-score once to use in evaluation
         z_series = calculate_zscore(price_series)
-
-        # Loop through grid of candidate threshold pairs
         for entry_thresh in entry_values:
             for exit_thresh in exit_values:
-                # Identify potential buy (long) and sell (short) signals based on thresholds.
                 buy_signals = z_series[z_series < entry_thresh]
                 sell_signals = z_series[z_series > exit_thresh]
-
-                # Simplified objective:
-                # For buy signals (which are negative) we take the absolute mean (i.e. more negative is better),
-                # and for sell signals (positive) we take the mean.
                 if not buy_signals.empty and not sell_signals.empty:
                     score_buy = -buy_signals.mean()
                     score_sell = sell_signals.mean()
                     score = score_buy + score_sell
                 else:
                     score = 0
-
                 if score > best_score:
                     best_score = score
                     best_params['entry_threshold'] = entry_thresh
                     best_params['exit_threshold'] = exit_thresh
-
         return best_params
 
 
     def set_optimal_thresholds(self, price_series: pd.Series):
-        """
-        Perform grid search and store optimal z-score thresholds as instance variables.
-        """
         optimal = self.grid_search_optimal_thresholds(price_series)
         self.optimal_entry_threshold = optimal['entry_threshold']
         self.optimal_exit_threshold = optimal['exit_threshold']
-        # Combine these into a single threshold value if desired (here as an average)
         self.optimal_threshold = (abs(self.optimal_entry_threshold) + abs(self.optimal_exit_threshold)) / 2
-        logger.print(f"Optimal thresholds set: Entry {self.optimal_entry_threshold}, Exit {self.optimal_exit_threshold}")
-
+        logger.print("Optimal thresholds set: Entry", self.optimal_entry_threshold, "Exit", self.optimal_exit_threshold)
