@@ -1,4 +1,4 @@
-from datamodel import OrderDepth, UserId, TradingState, Order, ConversionObservation
+from rd2.datamodel import OrderDepth, UserId, TradingState, Order, ConversionObservation
 from typing import List, Dict, Any
 import string
 import jsonpickle
@@ -46,7 +46,7 @@ class Trader:
             Product.PICNIC_BASKET1: 60,
             Product.CROISSANTS: 250,  # As specified in limits 
             Product.JAMS: 350,        # As specified in limits
-            Product.DJEMBES: 60,      # As specified in limits
+            Product.DJEMBES: 60,      # As in limits
         }
         
     

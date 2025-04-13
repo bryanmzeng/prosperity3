@@ -1,7 +1,7 @@
 import json
 from typing import Any, Dict, List
 import math
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+from rd2.datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
 #to run prosperity3bt tutorial/script.py 0
 

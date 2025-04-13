@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import jsonpickle
-from datamodel import OrderDepth, TradingState, Order
+from rd2.datamodel import OrderDepth, TradingState, Order
 
 
 class Product:
